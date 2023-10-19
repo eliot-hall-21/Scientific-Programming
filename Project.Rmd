@@ -1,0 +1,451 @@
+| title: "R Notebook" output: html_notebook                                                                                                                                                                                          |
+|:-----------------------------------------------------------------------|
+| This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code.                                                                                    |
+| Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*.                                                                                        |
+| Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Ctrl+Alt+I*.                                                                                                                                  |
+| When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Ctrl+Shift+K* to preview the HTML file).                                                  |
+| The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed. |
+
+### Setup and Importing:
+
+Libraries:
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(stringr)
+library(tibble)
+library(data.table)
+library(mapview)
+library(sf)
+library(leaflet)
+library(leafsync)
+library(maps)
+
+```
+
+Setting Directory and Import Bird Data:
+
+```{r}
+setwd("C:/Users/adael/OneDrive/Documents/Scientific Programming")
+
+Bird_Species <- read.csv("Bird_Species.csv")
+Bird_Trait <- read.csv("Bird_Trait.csv")
+Bird_Sites <- read.csv("Bird_Sites.csv")
+```
+
+Setting up dataframes so column naming is consistent and only relevant variables are present
+
+```{r}
+colnames(Bird_Species)[1] <- "City_ID"
+ 
+Bird_Trait <- Bird_Trait[, c(-2, -3 , -10:-19)] 
+Bird_Sites <- Bird_Sites[,-5:-8]
+```
+
+Import Amphibian Data:
+
+```{r}
+Amphibian_Species <- read.csv("Amphibian_Species.csv")
+Amphibian_Trait <- read.csv("Amphibian_Trait.csv")
+Amphibian_Sites <- read.csv("Amphibian_Site.csv")
+```
+
+Setting up dataframes so column naming is consistent and only relevant variables are present
+
+```{r}
+colnames(Amphibian_Species)[1] <- "SiteID"
+ 
+Amphibian_Trait <- Amphibian_Trait[, c(-2, -4, -6)] 
+Amphibian_Sites <- Amphibian_Sites[,-5:-12]
+```
+
+### Pre-processing:
+
+Merge Species + Sites Dataframes by SiteID / City_ID:
+
+```{r}
+Amphibian_Species_Sites <- left_join(Amphibian_Sites, Amphibian_Species, by = "SiteID")
+Bird_Species_Sites <- left_join(Bird_Sites, Bird_Species, by = "City_ID")
+```
+
+Check for NA's and fix:
+
+```{r}
+sum(is.na(Bird_Species_Sites))
+sum(is.na(Amphibian_Species_Sites))
+# join function automatically gets rid of NAs :) yay!
+
+# which(is.na(Amphibian_Trait)) # no NAs :)
+
+# which(is.na(Bird_Trait)) #many NAs....
+
+# creating a separate dataframe for the species with missing values to keep track 
+Bird_Trait_Missing <- Bird_Trait %>% filter(is.na(Bird_Trait$Hand.wing.index) | is.na(Bird_Trait$Fruit.nectar) | is.na(Bird_Trait$Invertebrate) | is.na(Bird_Trait$Omnivore) | is.na(Bird_Trait$Plant.seed) | is.na(Bird_Trait$Vertebrates.scavenger))
+
+# removing NAs from main dataframe
+Bird_Trait <- na.omit(Bird_Trait)
+
+# double check all dataframes for NAs again
+sum(is.na(Bird_Species_Sites))
+sum(is.na(Bird_Trait))
+sum(is.na(Amphibian_Species_Sites))
+sum(is.na(Amphibian_Trait))
+```
+
+Group Generalists and Specialists in Bird_Trait Dataframe:
+
+```{r}
+# first convert relevant columns to character so that replacing name is easier
+Bird_Trait$Fruit.nectar <- as.character(Bird_Trait$Fruit.nectar)
+Bird_Trait$Invertebrate <- as.character(Bird_Trait$Invertebrate)
+Bird_Trait$Omnivore <- as.character(Bird_Trait$Omnivore)
+Bird_Trait$Plant.seed <- as.character(Bird_Trait$Plant.seed)
+Bird_Trait$Vertebrates.scavenger <- as.character(Bird_Trait$Vertebrates.scavenger)
+
+# Replace Binary Values of Diet with Generalist or Specialist
+Bird_Trait$Fruit.nectar[Bird_Trait$Fruit.nectar == "1"] <- "Specialist"
+Bird_Trait$Invertebrate[Bird_Trait$Invertebrate == "1"] <- "Specialist"
+Bird_Trait$Plant.seed[Bird_Trait$Plant.seed == "1"] <- "Specialist"
+
+Bird_Trait$Omnivore[Bird_Trait$Omnivore == "1"] <- "Generalist" 
+Bird_Trait$Vertebrates.scavenger[Bird_Trait$Vertebrates.scavenger == "1"] <- "Generalist"
+
+Bird_Trait <- Bird_Trait %>% unite("Diet.breadth.S", c(Fruit.nectar, Invertebrate, Plant.seed)) #combining specialists
+Bird_Trait <- Bird_Trait %>% unite("Diet.breath.G", c(Omnivore, Vertebrates.scavenger)) #combining generalist #even though I dont technically need to do this because I won't be using this column, it allows me to easily check to make sure that I combined Specialist properly and there is no incorrect overlap 
+
+#unique(Bird_Trait$Diet.breadth.S) #checking string names in combined column to make sure I rename all of them correctly
+Bird_Trait$Diet.breadth.S[Bird_Trait$Diet.breadth.S == "0_0_0"] <- "Generalist"  # 0_0_0 is a generalist because if they are not a specialist then they are a generalist
+Bird_Trait$Diet.breadth.S[Bird_Trait$Diet.breadth.S == "0_Specialist_0"] <- "Specialist"
+Bird_Trait$Diet.breadth.S[Bird_Trait$Diet.breadth.S == "Specialist_0_0"] <- "Specialist"
+Bird_Trait$Diet.breadth.S[Bird_Trait$Diet.breadth.S == "0_0_Specialist"] <- "Specialist"
+
+#finalizing dataframe
+colnames(Bird_Trait)[3] <- "Diet.breadth" #renaming Diet column now that it contains all combined information for specialist and generalist 
+Bird_Trait <- Bird_Trait[, -4] #removing excess column
+```
+
+Look at Density Plot Hand.wing.index values - determine best way to bin them
+
+```{r}
+probs <- c(0.25, 0.5, 0.75)
+quantiles <- quantile(Bird_Trait$Hand.wing.index, prob=probs)
+quantiles
+mean(Bird_Trait$Hand.wing.index)
+
+density_plot <- ggplot(Bird_Trait, aes(x=Hand.wing.index)) +
+  geom_density(color="#3399CC", fill="#99CCCC") +
+  geom_vline(aes(xintercept = mean(Hand.wing.index)), color="blue", linetype="dashed", size=.75) +
+  geom_vline(aes(xintercept=18.07887), color="#6600FF",  linetype="dashed") +
+   geom_vline(aes(xintercept=25.57697), color="#6600FF",  linetype="dashed") +
+  geom_vline(aes(xintercept=38.65697), color="#6600FF",  linetype="dashed") +
+  annotate("text", x = 17, y = 0.005, label = "25th Quartile", angle = 90)  +
+  annotate("text", x = 24, y = 0.005, label = "Median", angle = 90) +
+  annotate("text", x = 37,  y = 0.005, label = "75th Quartile", angle = 90)  +
+  annotate("text", x = 28, y = 0.005, label = "Mean", angle = 90, color = "blue") +
+  labs(x = "Hand-Wing Index", y = "Density", title = "Density Plot of Hand-wing Index Measure")
+
+density_plot
+```
+
+Group Reduced, Moderate, and High Mobility in Bird_Trait Dataframe:
+
+```{r}
+
+Bird_Trait <- within(Bird_Trait, {
+  Movement.Distances <- NA
+  Movement.Distances[Hand.wing.index < 18.07887] <- "Reduced"
+  Movement.Distances[Hand.wing.index >= 18.07887 & Hand.wing.index < 38.65697] <- "Moderate"
+  Movement.Distances[Hand.wing.index >= 38.65697] <- "High"
+} )
+```
+
+![](images/Screenshot%202023-09-19%20at%2011-39-21%20Urbanisation%20generates%20multiple%20trait%20syndromes%20for%20terrestrial%20animal%20taxa%20worldwide%20-%20Nature%20Communications.png){width="540"}
+
+Creating Urban Syndromes: Amphibian
+
+```{r}
+
+# found problem:
+#  Amphibian movement.distances has "Reduced" and "Reduce" :(
+# AND Amphibian diet.breadth has "Generalist" and "Generalists"
+Amphibian_Trait$Movement.Distances[Amphibian_Trait$Movement.Distances == "Reduce"] <- "Reduced"
+Amphibian_Trait$Diet.breadth[Amphibian_Trait$Diet.breadth == "Generalists"] <- "Generalist"
+Amphibian_Trait$Diet.breadth[Amphibian_Trait$Diet.breadth == "Specialists"] <- "Specialist"
+
+# Mobile Generalist: Moderate to High Mobility & Generalist 
+# Mobile Specialist: Moderate to High Mobility & Specialist
+# Central Forager: Low to Moderate Mobility & Generalist 
+# Site Specialist: Low to Moderate Mobility & Specialist
+
+# found problem: 
+# the "Moderate" mobility category is messing up categorizing the syndromes - will have to split the Moderate 
+# Merge Moderate Mobility Generalist with High Mobility Generalist (Mobile Generalist) and Moderate Mobility Specialist with Reduced Mobility Specialist (Site Specialist) 
+# Majority of species have "Moderate" mobility - and the majority of those with "Moderate" Mobility are Generalist, and based on evidence, the "foraging modes" of amphibians reflect a continuum of low mobility specialist to high mobility generalist 
+
+Amphibian_Trait <- within(Amphibian_Trait, {
+  Syndrome <- NA
+  Syndrome[Diet.breadth == "Generalist" & Movement.Distances == "High"] <- "M.G."
+  Syndrome[Diet.breadth == "Generalist" & Movement.Distances == "Moderate"] <- "M.G."
+  Syndrome[Diet.breadth == "Generalist" & Movement.Distances == "Reduced"] <- "C.F."
+  Syndrome[Diet.breadth == "Specialist" & Movement.Distances == "High"] <- "M.S."
+  Syndrome[Diet.breadth == "Specialist" & Movement.Distances == "Reduced"] <- "S.S"
+  Syndrome[Diet.breadth == "Specialist" & Movement.Distances == "Moderate"] <- "S.S"
+})
+
+sum(is.na(Amphibian_Trait))
+```
+
+Creating Urban Syndromes: Birds
+
+```{r}
+#for birds the categorization is not a problem because I can still split High and Low mobility according to the median Hand.wing.index 
+
+Bird_Trait <- within(Bird_Trait, {
+  Syndrome <- NA
+  Syndrome[Diet.breadth == "Generalist" & Hand.wing.index >= 25.57697] <- "M.G."
+  Syndrome[Diet.breadth == "Generalist" & Hand.wing.index < 25.57697] <- "C.F"
+  Syndrome[Diet.breadth == "Specialist" & Hand.wing.index >= 25.57697] <- "M.S."
+  Syndrome[Diet.breadth == "Specialist" & Hand.wing.index < 25.57697] <- "S.S"
+})
+
+sum(is.na(Bird_Trait))
+```
+
+Converting Occurrence Data to be Syndrome Specific: Birds
+
+```{r}
+#creating occurrence column for each syndrome (if S.S = 1, else = 0 ...... etc.)
+Bird_Trait <- Bird_Trait %>% mutate(S.S = if_else(Syndrome == "S.S", 1, 0))
+Bird_Trait <- Bird_Trait %>% mutate(M.S = if_else(Syndrome == "M.S.", 1, 0))
+Bird_Trait <- Bird_Trait %>% mutate(M.G = if_else(Syndrome == "M.G.", 1, 0))
+Bird_Trait <- Bird_Trait %>% mutate(C.F = if_else(Syndrome == "C.F", 1, 0))
+
+# checking to make sure the occurrences have been inputted properly - the number of each Syndrome should make the sum of the occurrences  
+sum(Bird_Trait$Syndrome == "S.S") == sum(Bird_Trait$S.S)
+sum(Bird_Trait$Syndrome == "M.S.") == sum(Bird_Trait$M.S)
+sum(Bird_Trait$Syndrome == "M.G.") == sum(Bird_Trait$M.G)
+sum(Bird_Trait$Syndrome == "C.F") == sum(Bird_Trait$C.F)
+```
+
+```{r}
+#convert species name from "X.y" to "X y" structure (because I will need to match by species name)
+Bird_Trait$X <- lapply(Bird_Trait$X, gsub, pattern = " ", replacement = ".", fixed = TRUE)
+```
+
+```{r}
+# want to create a Bird_Species_Sites df per syndrome - this way, it will still be species occurrence - but the species will be "filtered" by their syndrome
+#----------------------------------------------------------------------------------
+
+# Site Specialist (S.S): 
+
+# separating syndrome and structuring appropriately 
+S.S_Bird_1 <- Bird_Trait[, c(1, 6)]
+rownames(S.S_Bird_1) <- NULL
+S.S_Bird_1 <- column_to_rownames(S.S_Bird_1, var = "X")
+
+# removing any species that DO NOT fall within this syndrome (indicated by 0) - since I want this df to be specific to this syndrome
+S.S_Bird_1 <- S.S_Bird_1 %>% filter(S.S == 1)
+
+# transposing so that I can match by column name (Species)
+S.S_Bird <- transpose(S.S_Bird_1)
+rownames(S.S_Bird) <- colnames(S.S_Bird_1)
+colnames(S.S_Bird) <- rownames(S.S_Bird_1)
+
+# structuring Bird_Species df appropriately so I can match by column name (species)
+Bird_Species <- column_to_rownames(Bird_Species, var = "City_ID")
+
+# Creating S.S Syndrome specific occurrence df based on matching Species names
+Bird_Species_S.S <- Bird_Species %>% select(matches(colnames(S.S_Bird)))
+
+#---------------------------------------------------------------------------------
+
+# Mobile Specialist(M.S):
+
+# separating syndrome and structuring appropriately 
+M.S_Bird_1 <- Bird_Trait[, c(1, 7)]
+rownames(M.S_Bird_1) <- NULL
+M.S_Bird_1 <- column_to_rownames(M.S_Bird_1, var = "X")
+
+# removing any species that DO NOT fall within this syndrome (indicated by 0) - since I want this df to be specific to this syndrome
+M.S_Bird_1 <- M.S_Bird_1 %>% filter(M.S == 1)
+
+# transposing so that I can match by column name (Species)
+M.S_Bird <- transpose(M.S_Bird_1)
+rownames(M.S_Bird) <- colnames(M.S_Bird_1)
+colnames(M.S_Bird) <- rownames(M.S_Bird_1)
+
+# Creating M.S Syndrome specific occurrence df based on matching Species names
+Bird_Species_M.S <- Bird_Species %>% select(matches(colnames(M.S_Bird)))
+
+#----------------------------------------------------------------------------------
+
+# Mobile Generalist (M.G):
+
+# separating syndrome and structuring appropriately 
+M.G_Bird_1 <- Bird_Trait[, c(1, 8)]
+rownames(M.G_Bird_1) <- NULL
+M.G_Bird_1 <- column_to_rownames(M.G_Bird_1, var = "X")
+
+# removing any species that DO NOT fall within this syndrome (indicated by 0) - since I want this df to be specific to this syndrome
+M.G_Bird_1 <- M.G_Bird_1 %>% filter(M.G == 1)
+
+# transposing so that I can match by column name (Species)
+M.G_Bird <- transpose(M.G_Bird_1)
+rownames(M.G_Bird) <- colnames(M.G_Bird_1)
+colnames(M.G_Bird) <- rownames(M.G_Bird_1)
+
+# Creating M.G Syndrome specific occurrence df based on matching Species names
+Bird_Species_M.G <- Bird_Species %>% select(matches(colnames(M.G_Bird)))
+
+#----------------------------------------------------------------------------------
+
+# Central Forager (C.F):
+
+# separating syndrome and structuring appropriately 
+C.F_Bird_1 <- Bird_Trait[, c(1, 9)]
+rownames(C.F_Bird_1) <- NULL
+C.F_Bird_1 <- column_to_rownames(C.F_Bird_1, var = "X")
+
+# removing any species that DO NOT fall within this syndrome (indicated by 0) - since I want this df to be specific to this syndrome
+C.F_Bird_1 <- C.F_Bird_1 %>% filter(C.F == 1)
+
+# transposing so that I can match by column name (Species)
+C.F_Bird <- transpose(C.F_Bird_1)
+rownames(C.F_Bird) <- colnames(C.F_Bird_1)
+colnames(C.F_Bird) <- rownames(C.F_Bird_1)
+
+# Creating C.F Syndrome specific occurrence df based on matching Species names
+Bird_Species_C.F <- Bird_Species %>% select(matches(colnames(C.F_Bird)))
+```
+
+```{r}
+# isolate locations in which syndromes occur in order to match relevant coordinates
+#----------------------------------------------------------------------------------
+
+# removing sites where there are no occurrences (sum of all species occurrence - sum across rows - is 0)
+Bird_Species_S.S$sum <- rowSums(Bird_Species_S.S)
+Bird_Species_S.S <- Bird_Species_S.S[-which(Bird_Species_S.S$sum == 0), ]
+# checking that all 0's were removed 
+which(Bird_Species_S.S$sum ==0)
+
+
+# removing sites where there are no occurrences (sum of all species occurrence - sum across rows - is 0)
+Bird_Species_M.S$sum <- rowSums(Bird_Species_M.S)
+Bird_Species_M.S <- Bird_Species_M.S[-which(Bird_Species_M.S$sum == 0), ]
+# checking that all 0's were removed 
+which(Bird_Species_M.S$sum ==0)
+
+
+# removing sites where there are no occurrences (sum of all species occurrence - sum across rows - is 0)
+Bird_Species_M.G$sum <- rowSums(Bird_Species_M.G)
+Bird_Species_M.G <- Bird_Species_M.G[-which(Bird_Species_M.G$sum == 0), ]
+# checking that all 0's were removed 
+which(Bird_Species_M.G$sum ==0)
+
+
+# removing sites where there are no occurrences (sum of all species occurrence - sum across rows - is 0)
+Bird_Species_C.F$sum <- rowSums(Bird_Species_C.F)
+Bird_Species_C.F <- Bird_Species_C.F[-which(Bird_Species_C.F$sum == 0), ]
+# checking that all 0's were removed 
+which(Bird_Species_C.F$sum ==0) 
+```
+
+## Mapping Spatial Distribution of Urban Syndromes
+
+Mapping Spatial Distribution of Urban Syndromes: Birds
+
+```{r}
+Bird_Sites <- column_to_rownames(Bird_Sites, var = "City_ID")
+```
+
+```{r}
+# creating df of syndrome locations  (lat, lng, and location data)
+    # S.S:
+S.S_location <- merge(Bird_Sites, Bird_Species_S.S, by = 'row.names', all = FALSE)
+S.S_location <- S.S_location[, c(-5:-1217)]
+colnames(S.S_location)[1] <- "City_ID"
+    # M.S: 
+M.S_location <- merge(Bird_Sites, Bird_Species_M.S, by = 'row.names', all = FALSE)
+M.S_location <- M.S_location[, c(-5:-1183)]
+colnames(M.S_location)[1] <- "City_ID"
+    # M.G: 
+M.G_location <- merge(Bird_Sites, Bird_Species_M.G, by = 'row.names', all = FALSE)
+M.G_location <- M.G_location[, c(-5:-470)]
+colnames(M.G_location)[1] <- "City_ID"
+    # C.F: 
+C.F_location <- merge(Bird_Sites, Bird_Species_C.F, by = 'row.names', all = FALSE)
+C.F_location <- C.F_location[, c(-5:-438)]
+colnames(C.F_location)[1] <- "City_ID"
+
+
+# converting to appropriate form in order to plot, identifying coordinates and map system type for each syndrome df
+test= st_as_sf(S.S_location, coords = c("longitude", "latitude"), crs = 4326)
+test_1= st_as_sf(M.S_location, coords = c("longitude", "latitude"), crs = 4326)S.S
+test_2= st_as_sf(M.G_location, coords = c("longitude", "latitude"), crs = 4326)
+test_3= st_as_sf(C.F_location, coords = c("longitude", "latitude"), crs = 4326)
+
+
+# in order to focus/visualize a more specific area, want to narrow to North & South America 
+western_hemisphere_data <- list(
+  S.S = st_as_sf(S.S_location[S.S_location$longitude < -30 & S.S_location$latitude > -30, ], coords = c("longitude", "latitude"), crs = 4326),
+  M.S = st_as_sf(M.S_location[M.S_location$longitude < -30 & M.S_location$latitude > -30, ], coords = c("longitude", "latitude"), crs = 4326),
+  M.G = st_as_sf(M.G_location[M.G_location$longitude < -30 & M.G_location$latitude > -30, ], coords = c("longitude", "latitude"), crs = 4326),
+  C.F = st_as_sf(C.F_location[C.F_location$longitude < -30 & C.F_location$latitude > -30, ], coords = c("longitude", "latitude"), crs = 4326)
+)
+
+# syndrome names for the layers
+layer_names <- c("SS", "MS", "MG", "CF")
+
+# Maps
+wholemap <- mapview(list(test, test_1, test_2, test_3), layer.name = layer_names, col.regions = c("blue", "orange", "green", "cyan"), alpha = 0.35, cex = 3) 
+
+westernmap <- mapview(western_hemisphere_data, layer.name = layer_names, col.regions = c("blue", "orange", "green", "cyan"), alpha = 0.35, cex = 3)
+
+latticeView(wholemap, westernmap) 
+
+```
+
+Mapping the Spatial of Urban Syndromes by Site Counts (because a lot of the cities overlap but not the specific sites)- in birds and amphibians
+
+```{r}
+
+  #S.S:
+t <- test[,-1]
+S.S.1 <- t %>% group_by(geometry) %>%
+  summarise( count = n() ) %>% ungroup()
+sst1 <- st_join(S.S.1, t)
+sst1 <- distinct(sst1, geometry, .keep_all = TRUE)
+  #M.S
+t1 <- test_1[,-1]
+M.S.1 <- t1 %>% group_by(geometry) %>%
+  summarise( count = n() ) %>% ungroup()
+mst1 <- st_join(M.S.1, t1)
+mst1 <- distinct(mst1, geometry, .keep_all = TRUE)
+  #M.G
+t2 <- test_2[,-1]
+M.G.1 <- t2 %>% group_by(geometry) %>%
+  summarise( count = n() ) %>% ungroup()
+mgt1 <- st_join(M.G.1, t2)
+mgt1 <- distinct(mgt1, geometry, .keep_all = TRUE)
+  #C.F
+t3 <- test_3[,-1]
+C.F.1 <- t3 %>% group_by(geometry) %>%
+  summarise( count = n() ) %>% ungroup()
+cft1 <- st_join(C.F.1, t3)
+cft1 <- distinct(cft1, geometry, .keep_all = TRUE)
+
+
+# mapview showing count (size of node) - per syndrome
+wholecountmap <- mapview(list(sst1,mst1,mgt1,cft1), layer.name = layer_names, col.regions = c("blue", "orange", "green", "cyan"), alpha = 0.35, cex = "count")
+wholecountmap
+
+```
+
+
+*\*\*\*\* do a histogram of site counts (can do some of them instead of all) per syndrome - in birds and amphibians
+
+
+\*\*\*\*\* do a histogram of number of species per syndrome - in birds and amphibians 
+
